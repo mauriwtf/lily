@@ -1,44 +1,66 @@
 from fastapi import FastAPI
-from app.routers import products, cart
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
-app = FastAPI(
-    title="FreshMix API",
-    version="1.0.0",
-    description="API de FreshMix para el e-commerce de jugos naturales y bebidas saludables."
+app = FastAPI(title="FreshMix API")
+
+# Habilitar CORS para conectar con React
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-@app.get("/")
-def read_root():
-    """
-    Endpoint de bienvenida que detalla las políticas y cumplimiento
-    de las normativas de consumo en la República Argentina.
-    """
-    return {
-        "marca": "FreshMix",
-        "eslogan": "Sabor natural en cada sorbo",
-        "ubicacion": "Villa Carlos Paz, Cordoba, Argentina",
-        "mensaje": "Bienvenido a la API oficial de FreshMix. Descubri nuestras bebidas saludables.",
-        "cumplimiento_legal": {
-            "ley_24240_defensa_consumidor": (
-                "En cumplimiento con la Ley N° 24.240 de Defensa del Consumidor de la Republica Argentina, "
-                "garantizamos el derecho a la informacion clara, detallada y veraz sobre las caracteristicas, "
-                "precios y condiciones de nuestros productos."
-            ),
-            "resolucion_424_2020_arrepentimiento": (
-                "Conforme a la Resolucion 424/2020 de la Secretaria de Comercio Interior, "
-                "se establece la obligacion de publicar un Boton de Arrepentimiento. "
-                "El consumidor tiene derecho a revocar la aceptacion de la compra dentro de los 10 dias "
-                "corridos contados a partir de la entrega del producto o de la celebracion del contrato sin responsabilidad alguna."
-            ),
-            "ley_25326_proteccion_datos": (
-                "De acuerdo con la Ley N° 25.326 de Proteccion de Datos Personales, nos comprometemos a "
-                "proteger la privacidad de sus datos y a utilizarlos estrictamente para procesar sus pedidos "
-                "y mejorar su experiencia de usuario. El titular de los datos personales tiene la facultad de "
-                "ejercer el derecho de acceso, rectificacion o supresion de los mismos."
-            )
-        }
-    }
+# Paso 1: Modelo Producto con Pydantic
+class Producto(BaseModel):
+    id: int
+    nombre: str
+    precio_final: float
+    cuotas_cantidad: int
+    cuotas_valor: float
+    garantia_meses: int
+    stock: int
 
-# Incluir routers
-app.include_router(products.router, prefix="/products", tags=["Products"])
-app.include_router(cart.router, prefix="/cart", tags=["Cart"])
+# Paso 2: Lista en memoria con 3 productos
+productos_db: list[Producto] = [
+    Producto(
+        id=1,
+        nombre="Jugo de Naranja Natural",
+        precio_final=4500.0,
+        cuotas_cantidad=3,
+        cuotas_valor=1500.0,
+        garantia_meses=1,
+        stock=50
+    ),
+    Producto(
+        id=2,
+        nombre="Jugo Tropical",
+        precio_final=5200.0,
+        cuotas_cantidad=3,
+        cuotas_valor=1733.33,
+        garantia_meses=1,
+        stock=30
+    ),
+    Producto(
+        id=3,
+        nombre="Jugo Detox Verde",
+        precio_final=5500.0,
+        cuotas_cantidad=3,
+        cuotas_valor=1833.33,
+        garantia_meses=1,
+        stock=25
+    )
+]
+
+# Paso 3: Endpoint GET /productos
+@app.get("/productos", response_model=list[Producto])
+def obtener_productos():
+    return productos_db
+
+# Paso 4: Endpoint POST /productos
+@app.post("/productos", response_model=Producto, status_code=201)
+def crear_producto(producto: Producto):
+    productos_db.append(producto)
+    return producto
