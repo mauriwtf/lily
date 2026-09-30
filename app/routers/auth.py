@@ -1,77 +1,120 @@
+from datetime import timedelta
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
-from sqlalchemy.orm import Session
-from datetime import datetime, timedelta, timezone
 from jose import JWTError, jwt
+from sqlalchemy.orm import Session
 
-from app.dependencies import get_db
-from app.models import Usuario
-from app.schemas.usuario import UsuarioCreate, UsuarioOut, Token, RefreshTokenRequest
-from app.core import security
+from app import models
 from app.core.config import settings
+from app.core.security import crear_token, hash_password, verificar_password
+from app.database import get_db
 from app.dependencies import get_current_user
+from app.schemas.usuario import (
+    RefreshTokenRequest,
+    Token,
+    UsuarioCreate,
+    UsuarioOut,
+)
 
 router = APIRouter(prefix="/auth", tags=["Autenticación"])
 
-@router.post("/register", response_model=UsuarioOut, status_code=status.HTTP_201_CREATED)
-def registrar_usuario(usuario_in: UsuarioCreate, db: Session = Depends(get_db)):
-    usuario_existente = db.query(Usuario).filter(Usuario.email == usuario_in.email).first()
-    if usuario_existente:
-        raise HTTPException(status_code=400, detail="El email ya está registrado")
 
-    nuevo_usuario = Usuario(
-        nombre=usuario_in.nombre,
-        email=usuario_in.email,
-        hashed_password=security.hash_password(usuario_in.password),
-        acepto_tratamiento=usuario_in.acepto_tratamiento,
-        fecha_consentimiento=datetime.now(timezone.utc),
-        rol="customer"
+@router.post(
+    "/register", response_model=UsuarioOut, status_code=status.HTTP_201_CREATED
+)
+def registrar_usuario(usuario: UsuarioCreate, db: Session = Depends(get_db)):
+    db_user = (
+        db.query(models.Usuario)
+        .filter(models.Usuario.email == usuario.email)
+        .first()
+    )
+    if db_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El email ya está registrado",
+        )
+
+    nuevo_usuario = models.Usuario(
+        nombre=usuario.nombre,
+        email=usuario.email,
+        hashed_password=hash_password(usuario.password),
+        acepto_tratamiento=usuario.acepto_tratamiento,
+        rol="cliente",
+        activo=True,
     )
     db.add(nuevo_usuario)
     db.commit()
     db.refresh(nuevo_usuario)
     return nuevo_usuario
 
+
 @router.post("/login", response_model=Token)
-def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    usuario = db.query(Usuario).filter(Usuario.email == form_data.username).first()
-    if not usuario or not security.verificar_password(form_data.password, usuario.hashed_password):
+def login(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db),
+):
+    # Buscar usuario por email (Swagger UI manda el email en form_data.username)
+    usuario = (
+        db.query(models.Usuario)
+        .filter(models.Usuario.email == form_data.username)
+        .first()
+    )
+
+    # Validar existencia y contraseña
+    if not usuario or not verificar_password(
+        form_data.password, usuario.hashed_password
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Email o contraseña incorrectos",
+            detail="Credenciales inválidas",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    access_expires = timedelta(minutes=settings.ACCESS_MIN)
-    refresh_expires = timedelta(minutes=settings.REFRESH_MIN)
+    # Validar que la cuenta no esté dada de baja / inactivada
+    if hasattr(usuario, "activo") and not usuario.activo:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="La cuenta se encuentra desactivada o dada de baja",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
-    access_token = security.crear_token(
+    # Generación de tokens
+    access_token = crear_token(
         data={"sub": usuario.email, "rol": usuario.rol, "tipo": "access"},
-        expires_delta=access_expires
+        expires_delta=timedelta(minutes=int(settings.ACCESS_MIN)),
     )
-    refresh_token = security.crear_token(
+    refresh_token = crear_token(
         data={"sub": usuario.email, "rol": usuario.rol, "tipo": "refresh"},
-        expires_delta=refresh_expires
+        expires_delta=timedelta(minutes=int(settings.REFRESH_MIN)), 
     )
 
     return {
         "access_token": access_token,
         "refresh_token": refresh_token,
-        "token_type": "bearer"
+        "token_type": "bearer",
     }
 
+
 @router.get("/me", response_model=UsuarioOut)
-def obtener_perfil(current_user: Usuario = Depends(get_current_user)):
+def obtener_perfil(current_user: models.Usuario = Depends(get_current_user)):
     return current_user
 
+
 @router.post("/refresh", response_model=Token)
-def refrescar_token(body: RefreshTokenRequest, db: Session = Depends(get_db)):
+def refresh_token(
+    request: RefreshTokenRequest, db: Session = Depends(get_db)
+):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Token de refresco inválido o expirado"
+        detail="Token de refresco inválido o expirado",
+        headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        payload = jwt.decode(body.refresh_token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        payload = jwt.decode(
+            request.refresh_token,
+            settings.SECRET_KEY,
+            algorithms=[settings.ALGORITHM],
+        )
         email: str = payload.get("sub")
         tipo: str = payload.get("tipo")
         if email is None or tipo != "refresh":
@@ -79,25 +122,23 @@ def refrescar_token(body: RefreshTokenRequest, db: Session = Depends(get_db)):
     except JWTError:
         raise credentials_exception
 
-    usuario = db.query(Usuario).filter(Usuario.email == email).first()
-    if not usuario:
+    usuario = (
+        db.query(models.Usuario).filter(models.Usuario.email == email).first()
+    )
+    if not usuario or (hasattr(usuario, "activo") and not usuario.activo):
         raise credentials_exception
 
-    access_expires = timedelta(minutes=settings.ACCESS_MIN)
-    refresh_expires = timedelta(minutes=settings.REFRESH_MIN)
-
-    nuevo_access = security.crear_token(
+    new_access_token = crear_token(
         data={"sub": usuario.email, "rol": usuario.rol, "tipo": "access"},
-        expires_delta=access_expires
+        expires_delta=timedelta(minutes=settings.ACCESS_MIN),
     )
-    nuevo_refresh = security.crear_token(
+    new_refresh_token = crear_token(
         data={"sub": usuario.email, "rol": usuario.rol, "tipo": "refresh"},
-        expires_delta=refresh_expires
+        expires_delta=timedelta(minutes=settings.REFRESH_MIN),
     )
 
     return {
-        "access_token": nuevo_access,
-        "refresh_token": nuevo_refresh,
-        "token_type": "bearer"
+        "access_token": new_access_token,
+        "refresh_token": new_refresh_token,
+        "token_type": "bearer",
     }
-
